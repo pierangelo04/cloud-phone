@@ -1,0 +1,163 @@
+name: Cloud Phone
+
+# Telefono Android rootato on-demand su GitHub Actions.
+# Avvio manuale da Actions -> "Cloud Phone" -> "Run workflow".
+# Limite tecnico: il job muore dopo ~6 ore (limite GitHub).
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'Per quanti minuti tenere acceso il telefono (max 350)'
+        required: false
+        default: '330'
+      api:
+        description: 'API level Android'
+        required: false
+        default: '33'
+
+env:
+  ANDROID_SDK_ROOT: /home/runner/android-sdk
+  AVD_NAME: phone
+
+jobs:
+  cloud-phone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: 1/8 Controllo KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm non disponibile su questo runner: senza KVM l'emulatore e' inutilizzabile."
+            exit 1
+          fi
+          ls -l /dev/kvm
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+
+      - name: 2/8 Cache SDK + AVD
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/android-sdk
+            /home/runner/.android/avd
+          key: cloud-phone-api${{ inputs.api }}-v1
+
+      - name: 3/8 Installa Android SDK
+        run: |
+          set -e
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            mkdir -p /tmp/ct && cd /tmp/ct
+            curl -sL -o ct.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+            unzip -q ct.zip
+            mv cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          fi
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platform-tools" "emulator" \
+            "system-images;android-${{ inputs.api }};google_apis;x86_64" 2>&1 | tail -2
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/emulator" >> "$GITHUB_PATH"
+
+      - name: 4/8 Crea AVD (solo la prima volta)
+        run: |
+          set -e
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          if [ ! -d "/home/runner/.android/avd/$AVD_NAME.avd" ]; then
+            echo no | avdmanager create avd -n "$AVD_NAME" \
+              -k "system-images;android-${{ inputs.api }};google_apis;x86_64" \
+              -d pixel_6 --force
+            # usa 3 core del runner
+            sed -i 's/^hw.cpu.ncore.*/hw.cpu.ncore = 3/' \
+              "/home/runner/.android/avd/$AVD_NAME.avd/config.ini"
+          fi
+          grep ncore "/home/runner/.android/avd/$AVD_NAME.avd/config.ini"
+
+      - name: 5/8 Avvia display virtuale + emulatore
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb x11vnc libxcb-cursor0 > /dev/null
+          Xvfb :99 -screen 0 720x1280x24 &
+          export DISPLAY=:99
+          sleep 2
+          rm -f "/home/runner/.android/avd/$AVD_NAME.avd/"*.lock
+          emulator -avd "$AVD_NAME" -no-audio -no-boot-anim \
+            -gpu swiftshader_indirect -memory 2048 > /tmp/emu.log 2>&1 &
+          # se Qt non parte, fallisci subito con un messaggio chiaro
+          sleep 20
+          if grep -q "no Qt platform plugin" /tmp/emu.log; then
+            echo "::error::Qt dell'emulatore non si avvia sul display virtuale. Vedi /tmp/emu.log"
+            tail -20 /tmp/emu.log
+            exit 1
+          fi
+          echo "Emulatore lanciato, attendo il boot (puo' volerci 10-20 min la prima volta)..."
+          BOOTED=""
+          for i in $(seq 1 100); do
+            BOOTED="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+            if [ "$BOOTED" = "1" ]; then
+              echo "Boot completato!"
+              break
+            fi
+            sleep 15
+          done
+          if [ "$BOOTED" != "1" ]; then
+            echo "::error::Boot non completato in 25 minuti."
+            exit 1
+          fi
+
+      - name: 6/8 Root
+        run: |
+          adb root
+          sleep 3
+          adb shell id
+
+      - name: 7/8 Tailscale (opzionale, se hai messo il secret)
+        if: ${{ secrets.TAILSCALE_AUTHKEY != '' }}
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: 8/8 noVNC + tunnel Cloudflare
+        run: |
+          set -e
+          curl -sL -o /tmp/novnc.tgz \
+            https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
+          mkdir -p /tmp/novnc && tar xzf /tmp/novnc.tgz -C /tmp/novnc --strip-components=1
+          pip install -q websockify
+          websockify --web /tmp/novnc 8000 127.0.0.1:5900 > /tmp/websockify.log 2>&1 &
+          DISPLAY=:99 x11vnc -display :99 -forever -nopw -rfbport 5900 -quiet \
+            > /tmp/x11vnc.log 2>&1 &
+          sleep 3
+          curl -sL -o /tmp/cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared tunnel --url http://127.0.0.1:8000 --no-autoupdate \
+            > /tmp/cf.log 2>&1 &
+          URL=""
+          for i in $(seq 1 30); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log | head -1)
+            [ -n "$URL" ] && break
+            sleep 4
+          done
+          if [ -z "$URL" ]; then
+            echo "::error::Tunnel Cloudflare non partito."
+            tail -20 /tmp/cf.log
+            exit 1
+          fi
+          echo "PHONE_URL=${URL}/vnc.html" >> "$GITHUB_ENV"
+          {
+            echo "### 📱 Cloud Phone pronto"
+            echo ""
+            echo "**Apri nel browser:** ${URL}/vnc.html"
+            echo ""
+            echo "Premi **Connetti**. Il telefono resta acceso per ${{ inputs.minutes }} minuti."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::URL telefono: ${URL}/vnc.html"
+
+      - name: Tieni vivo il telefono
+        run: |
+          echo "Telefono attivo per ${{ inputs.minutes }} minuti. URL: ${{ env.PHONE_URL }}"
+          sleep $(( ${{ inputs.minutes }} * 60 ))
