@@ -67,15 +67,23 @@ jobs:
         run: |
           set -e
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
-          if [ ! -d "/home/runner/.android/avd/$AVD_NAME.avd" ]; then
+          export ANDROID_AVD_HOME="/home/runner/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          if [ ! -d "$ANDROID_AVD_HOME/$AVD_NAME.avd" ]; then
             echo no | avdmanager create avd -n "$AVD_NAME" \
               -k "system-images;android-${{ inputs.api }};google_apis;x86_64" \
               -d pixel_6 --force
-            # usa 3 core del runner
-            sed -i 's/^hw.cpu.ncore.*/hw.cpu.ncore = 3/' \
-              "/home/runner/.android/avd/$AVD_NAME.avd/config.ini"
           fi
-          grep ncore "/home/runner/.android/avd/$AVD_NAME.avd/config.ini"
+          echo "--- contenuto AVD_HOME ---"
+          ls -la "$ANDROID_AVD_HOME/"
+          if [ -f "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini" ]; then
+            sed -i 's/^hw.cpu.ncore.*/hw.cpu.ncore = 3/' \
+              "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
+            grep ncore "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
+          else
+            echo "::error::AVD '$AVD_NAME' non creato da avdmanager."
+            exit 1
+          fi
 
       - name: 5/8 Avvia display virtuale + emulatore
         run: |
