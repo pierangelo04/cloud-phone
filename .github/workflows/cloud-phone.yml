@@ -24,6 +24,8 @@ jobs:
   cloud-phone:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    env:
+      HAS_TAILSCALE: ${{ secrets.TAILSCALE_AUTHKEY != '' }}
 
     steps:
       - name: 1/8 Controllo KVM
@@ -115,7 +117,7 @@ jobs:
           adb shell id
 
       - name: 7/8 Tailscale (opzionale, se hai messo il secret)
-        if: ${{ secrets.TAILSCALE_AUTHKEY != '' }}
+        if: ${{ env.HAS_TAILSCALE == 'true' }}
         uses: tailscale/github-action@v3
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
