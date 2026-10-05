@@ -176,9 +176,10 @@ jobs:
             echo ""
             echo "Il telefono resta acceso per ${{ inputs.minutes }} minuti."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice::URL telefono: ${URL}/vnc.html"
+          # URL solo nel riepilogo del job (non nei log): il repo e' pubblico
+          echo "URL salvato nel riepilogo del job."
 
       - name: Tieni vivo il telefono
         run: |
-          echo "Telefono attivo per ${{ inputs.minutes }} minuti. URL: ${{ env.PHONE_URL }}"
+          echo "Telefono attivo per ${{ inputs.minutes }} minuti (URL nel riepilogo del job)."
           sleep $(( ${{ inputs.minutes }} * 60 ))
