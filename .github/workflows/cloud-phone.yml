@@ -131,14 +131,23 @@ jobs:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
       - name: 8/8 noVNC + tunnel Cloudflare
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           set -e
+          if [ -z "$VNC_PASSWORD" ]; then
+            echo "::error::Secret VNC_PASSWORD non impostato: aggiungilo in Settings -> Secrets -> Actions."
+            exit 1
+          fi
           curl -sL -o /tmp/novnc.tgz \
             https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
           mkdir -p /tmp/novnc && tar xzf /tmp/novnc.tgz -C /tmp/novnc --strip-components=1
           pip install -q websockify
           websockify --web /tmp/novnc 8000 127.0.0.1:5900 > /tmp/websockify.log 2>&1 &
-          DISPLAY=:99 x11vnc -display :99 -forever -nopw -rfbport 5900 -quiet \
+          # password VNC da secret (mai in argv/log): x11vnc la legge dal file
+          printf '%s' "$VNC_PASSWORD" > /tmp/vncpw.txt
+          chmod 600 /tmp/vncpw.txt
+          DISPLAY=:99 x11vnc -display :99 -forever -passwdfile /tmp/vncpw.txt -rfbport 5900 -quiet \
             > /tmp/x11vnc.log 2>&1 &
           sleep 3
           curl -sL -o /tmp/cloudflared \
@@ -163,7 +172,9 @@ jobs:
             echo ""
             echo "**Apri nel browser:** ${URL}/vnc.html"
             echo ""
-            echo "Premi **Connetti**. Il telefono resta acceso per ${{ inputs.minutes }} minuti."
+            echo "Premi **Connetti** e inserisci la password VNC (il secret VNC_PASSWORD del repo)."
+            echo ""
+            echo "Il telefono resta acceso per ${{ inputs.minutes }} minuti."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::URL telefono: ${URL}/vnc.html"
 
